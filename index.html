@@ -2,7 +2,7 @@
 <html lang="cs">
 <head>
   <meta charset="UTF-8" />
-  <title>Nostr Web Chat (NIP-59 v2 Edition)</title>
+  <title>Nostr Web Chat (NIP-59 v2 + IndexedDB)</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
   <style>
     body { background-color: #f0f2f5; }
@@ -22,7 +22,10 @@
     
     <div class="d-flex justify-content-between align-items-center mb-2">
       <h4 class="mb-0">Nostr Chat (NIP-04 + NIP-59)</h4>
-      <button id="publishRelaysBtn" class="btn btn-warning btn-sm">📡 Oznámit relaye pro Amethyst</button>
+      <div>
+        <button id="clearDbBtn" class="btn btn-outline-danger btn-sm me-2">🗑️ Vymazat DB</button>
+        <button id="publishRelaysBtn" class="btn btn-warning btn-sm">📡 Oznámit relaye pro Amethyst</button>
+      </div>
     </div>
 
     <div class="card shadow-sm mb-3">
@@ -36,7 +39,7 @@
     </div>
 
     <div class="card shadow-sm">
-      <div class="card-header bg-dark text-white py-1 small">🐞 Vývojářský Log</div>
+      <div class="card-header bg-dark text-white py-1 small">🐞 Vývojářský Log (Nyní s lokálním ukládáním IndexedDB)</div>
       <div id="debugLog"></div>
     </div>
 
@@ -79,9 +82,82 @@
       debugLog.scrollTop = debugLog.scrollHeight;
     }
 
-    function connectRelays() {
-      const filter1 = { kinds: [4, 1059], authors: [PUBLIC_KEY_HEX], limit: 50 };
-      const filter2 = { kinds: [4, 1059], '#p': [PUBLIC_KEY_HEX], limit: 50 };
+    // ==========================================
+    // LOKÁLNÍ DATABÁZE (INDEXED DB)
+    // ==========================================
+    const DB_NAME = 'NostrChatDB';
+    const DB_VERSION = 1;
+    const STORE_NAME = 'messages';
+
+    function initDB() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onerror = (e) => reject(e.target.error);
+        request.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains(STORE_NAME)) {
+            const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+            store.createIndex('timestamp', 'timestamp', { unique: false });
+            store.createIndex('partnerPubkey', 'partnerPubkey', { unique: false });
+          }
+        };
+        request.onsuccess = (e) => resolve(e.target.result);
+      });
+    }
+
+    async function saveMessage(msgObj) {
+      try {
+        const db = await initDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, 'readwrite');
+          const store = tx.objectStore(STORE_NAME);
+          const request = store.put(msgObj);
+          request.onsuccess = () => resolve();
+          request.onerror = () => reject(request.error);
+        });
+      } catch (e) {
+        logDebug("ERROR", "Nepodařilo se uložit zprávu do DB", e);
+      }
+    }
+
+    async function getMessages(partnerPubkey) {
+      const db = await initDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const store = tx.objectStore(STORE_NAME);
+        const index = store.index('partnerPubkey');
+        const request = index.getAll(IDBKeyRange.only(partnerPubkey));
+        request.onsuccess = () => {
+          resolve(request.result.sort((a, b) => a.timestamp - b.timestamp));
+        };
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    // Tlačítko pro vymazání DB
+    document.getElementById("clearDbBtn").addEventListener("click", () => {
+      if (confirm("Opravdu vymazat celou historii chatu z paměti prohlížeče?")) {
+        indexedDB.deleteDatabase(DB_NAME);
+        location.reload();
+      }
+    });
+
+    // ==========================================
+    // PŘIPOJENÍ A STAHOVÁNÍ
+    // ==========================================
+    function connectRelays(lastTimestamp) {
+      const filter1 = { kinds: [4, 1059], authors: [PUBLIC_KEY_HEX] };
+      const filter2 = { kinds: [4, 1059], '#p': [PUBLIC_KEY_HEX] };
+
+      // Ochrana před datovým spamem - pokud máme DB, stahujeme jen novinky!
+      if (lastTimestamp) {
+        filter1.since = lastTimestamp + 1;
+        filter2.since = lastTimestamp + 1;
+      } else {
+        filter1.limit = 50;
+        filter2.limit = 50;
+      }
+
       const reqMsg = JSON.stringify(["REQ", "chat-sync", filter1, filter2]);
 
       relayURLs.forEach(url => {
@@ -119,6 +195,7 @@
           try {
             const text = await nip04.decrypt(PRIVATE_KEY_BYTES, otherPubKey, ev.content);
             displayMessage(text, isMe, ev.created_at, ev.id);
+            saveMessage({ id: ev.id, text, isMe, timestamp: ev.created_at, partnerPubkey: partnerHex });
           } catch (e) {}
         }
         return;
@@ -140,6 +217,7 @@
             if (gossipEvent.kind === 14) {
               if (realSenderPubkey === partnerHex) {
                 displayMessage(gossipEvent.content, false, gossipEvent.created_at, ev.id);
+                saveMessage({ id: ev.id, text: gossipEvent.content, isMe: false, timestamp: gossipEvent.created_at, partnerPubkey: partnerHex });
               }
             }
           }
@@ -148,6 +226,9 @@
     }
 
     function displayMessage(text, isMe, timestamp, id) {
+      // Ochrana proti vykreslení duplikátu v cache
+      if (messagesCache.some(m => m.id === id)) return;
+      
       messagesCache.push({ id, text, isMe, timestamp });
       messagesCache.sort((a, b) => a.timestamp - b.timestamp);
       
@@ -212,6 +293,7 @@
         });
 
         displayMessage(text, true, now, wrapEvent.id);
+        saveMessage({ id: wrapEvent.id, text, isMe: true, timestamp: now, partnerPubkey: partnerHex });
         messageInput.value = "";
 
       } catch (err) {
@@ -219,12 +301,10 @@
       }
     });
 
-    // --- ZDE JE OPRAVA PRO AMETHYST ---
     document.getElementById("publishRelaysBtn").addEventListener("click", () => {
       try {
         const now = Math.floor(Date.now() / 1000);
 
-        // 1. Obecný seznam relayů (NIP-65, Kind 10002)
         const event10002 = finalizeEvent({
           kind: 10002, 
           created_at: now,
@@ -232,7 +312,6 @@
           content: ""
         }, PRIVATE_KEY_BYTES);
 
-        // 2. Speciální seznam pro soukromé zprávy (NIP-17, Kind 10050) - Amethyst na něj čeká!
         const event10050 = finalizeEvent({
           kind: 10050,
           created_at: now,
@@ -248,14 +327,46 @@
         });
         
         logDebug("INFO", "✅ Odesláno nastavení relayů (NIP-65 i NIP-17)");
-        alert("Nastavení odesláno! Nyní MUSÍŠ jít do Amethystu, otevřít profil tohoto testovacího účtu a 'potáhnout dolů' (obnovit profil), aby si Amethyst načetl tyto nové informace.");
+        alert("Nastavení odesláno! Nyní MUSÍŠ jít do Amethystu, otevřít profil tohoto testovacího účtu a 'potáhnout dolů' (obnovit profil).");
       } catch (err) {
         logDebug("ERROR", "Chyba oznámení relayů", err.message || err);
       }
     });
 
     messageInput.addEventListener("keypress", (e) => { if (e.key === "Enter") sendBtn.click(); });
-    connectRelays();
+    
+    // ==========================================
+    // INICIALIZACE PO STARTU STRÁNKY
+    // ==========================================
+    async function startChat() {
+      try {
+        // 1. Zkusíme načíst historii z prohlížeče
+        const localHistory = await getMessages(partnerHex);
+        let lastTimestamp = null;
+
+        if (localHistory.length > 0) {
+          logDebug("INFO", `Načteno ${localHistory.length} zpráv z lokální databáze.`);
+          const statusEl = document.getElementById("chatStatus");
+          if (statusEl) statusEl.style.display = "none";
+          
+          localHistory.forEach(msg => {
+            seenEvents.add(msg.id);
+            displayMessage(msg.text, msg.isMe, msg.timestamp, msg.id);
+          });
+          lastTimestamp = localHistory[localHistory.length - 1].timestamp;
+        }
+
+        // 2. Teprve nyní se připojíme k síti
+        connectRelays(lastTimestamp);
+
+      } catch (err) {
+        logDebug("ERROR", "Chyba lokální databáze. Načítám vše z relayů.", err);
+        connectRelays(null);
+      }
+    }
+
+    // Spuštění
+    startChat();
   </script>
 </body>
 </html>
