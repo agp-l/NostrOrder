@@ -22,7 +22,7 @@
     
     <div class="d-flex justify-content-between align-items-center mb-2">
       <h4 class="mb-0">Nostr Chat (NIP-04 + NIP-59)</h4>
-      <button id="publishRelaysBtn" class="btn btn-warning btn-sm">📡 Oznámit mé relaye</button>
+      <button id="publishRelaysBtn" class="btn btn-warning btn-sm">📡 Oznámit relaye pro Amethyst</button>
     </div>
 
     <div class="card shadow-sm mb-3">
@@ -36,14 +36,13 @@
     </div>
 
     <div class="card shadow-sm">
-      <div class="card-header bg-dark text-white py-1 small">🐞 Vývojářský Log (Plná kompatibilita s Amethyst)</div>
+      <div class="card-header bg-dark text-white py-1 small">🐞 Vývojářský Log</div>
       <div id="debugLog"></div>
     </div>
 
   </div>
 
   <script type="module">
-    // Přidali jsme getEventHash pro správné generování vnitřní zprávy
     import { getPublicKey, finalizeEvent, generateSecretKey, getEventHash, nip04, nip44, nip19 } from 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
     import { hexToBytes } from 'https://cdn.jsdelivr.net/npm/@noble/hashes@1.3.0/utils/+esm';
 
@@ -120,9 +119,7 @@
           try {
             const text = await nip04.decrypt(PRIVATE_KEY_BYTES, otherPubKey, ev.content);
             displayMessage(text, isMe, ev.created_at, ev.id);
-          } catch (e) {
-            logDebug("ERROR", "Chyba dešifrování NIP-04", e.message);
-          }
+          } catch (e) {}
         }
         return;
       }
@@ -141,16 +138,12 @@
             const gossipEvent = JSON.parse(gossipJson); 
 
             if (gossipEvent.kind === 14) {
-              logDebug("SUCCESS", "🎁 NIP-59 úspěšně rozbaleno!", gossipEvent);
-              
               if (realSenderPubkey === partnerHex) {
                 displayMessage(gossipEvent.content, false, gossipEvent.created_at, ev.id);
               }
             }
           }
-        } catch (e) {
-          logDebug("ERROR", "❌ NIP-59 se nepodařilo rozbalit", e.message);
-        }
+        } catch (e) {}
       }
     }
 
@@ -170,7 +163,6 @@
       chatWindow.scrollTop = chatWindow.scrollHeight;
     }
 
-    // --- ZABALENÍ A ODESLÁNÍ (NIP-59) ---
     sendBtn.addEventListener("click", async () => {
       const text = messageInput.value.trim();
       if (!text) return;
@@ -178,36 +170,30 @@
       try {
         const now = Math.floor(Date.now() / 1000);
 
-        // 1. GOSSIP (Samotná zpráva) - ZDE JE OPRAVA!
         const gossipTemplate = {
           kind: 14,
-          pubkey: PUBLIC_KEY_HEX, // Amethyst to potřebuje, aby věděl od koho to je
+          pubkey: PUBLIC_KEY_HEX,
           created_at: now,
           tags: [["p", partnerHex]],
           content: text
         };
 
-        // Vygenerujeme ID a přidáme prázdný podpis přesně tak, jak to dělá Amethyst
         const gossipEvent = {
           ...gossipTemplate,
           id: getEventHash(gossipTemplate),
           sig: ""
         };
 
-        // 2. SEAL (Pečeť)
         const innerKey = nip44.getConversationKey(PRIVATE_KEY_BYTES, partnerHex);
         const sealContent = nip44.encrypt(JSON.stringify(gossipEvent), innerKey);
         
-        // Záměrně u pečeti posuneme čas dozadu, protože NIP-59 nařizuje "obfuskaci" časů
-        // Někdy klienti ignorují zprávy, kde má Obal i Pečeť naprosto stejný čas
         const sealEvent = finalizeEvent({
           kind: 13,
-          created_at: now - Math.floor(Math.random() * 3600), // Mínus až 1 hodina
+          created_at: now - Math.floor(Math.random() * 3600), 
           tags: [],
           content: sealContent
         }, PRIVATE_KEY_BYTES);
 
-        // 3. WRAP (Dárkový obal s náhodným odesílatelem)
         const ephemeralPriv = generateSecretKey(); 
         const ephemeralPub = getPublicKey(ephemeralPriv);
         
@@ -221,12 +207,10 @@
           content: wrapContent
         }, ephemeralPriv);
 
-        // Rozeslání
         sockets.forEach(ws => {
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(["EVENT", wrapEvent]));
         });
 
-        logDebug("SUCCESS", "📤 Odeslána plně kompatibilní NIP-59 Matrjoška", wrapEvent);
         displayMessage(text, true, now, wrapEvent.id);
         messageInput.value = "";
 
@@ -235,19 +219,36 @@
       }
     });
 
+    // --- ZDE JE OPRAVA PRO AMETHYST ---
     document.getElementById("publishRelaysBtn").addEventListener("click", () => {
       try {
-        const eventTemplate = {
+        const now = Math.floor(Date.now() / 1000);
+
+        // 1. Obecný seznam relayů (NIP-65, Kind 10002)
+        const event10002 = finalizeEvent({
           kind: 10002, 
-          created_at: Math.floor(Date.now() / 1000),
+          created_at: now,
           tags: relayURLs.map(url => ["r", url]), 
           content: ""
-        };
-        const event = finalizeEvent(eventTemplate, PRIVATE_KEY_BYTES);
+        }, PRIVATE_KEY_BYTES);
+
+        // 2. Speciální seznam pro soukromé zprávy (NIP-17, Kind 10050) - Amethyst na něj čeká!
+        const event10050 = finalizeEvent({
+          kind: 10050,
+          created_at: now,
+          tags: relayURLs.map(url => ["relay", url]),
+          content: ""
+        }, PRIVATE_KEY_BYTES);
         
-        sockets.forEach(ws => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(["EVENT", event])); });
-        logDebug("INFO", "✅ Relay list oznámen", event);
-        alert("Relaye oznámeny!");
+        sockets.forEach(ws => { 
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(["EVENT", event10002])); 
+            ws.send(JSON.stringify(["EVENT", event10050])); 
+          }
+        });
+        
+        logDebug("INFO", "✅ Odesláno nastavení relayů (NIP-65 i NIP-17)");
+        alert("Nastavení odesláno! Nyní MUSÍŠ jít do Amethystu, otevřít profil tohoto testovacího účtu a 'potáhnout dolů' (obnovit profil), aby si Amethyst načetl tyto nové informace.");
       } catch (err) {
         logDebug("ERROR", "Chyba oznámení relayů", err.message || err);
       }
