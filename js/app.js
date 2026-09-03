@@ -238,6 +238,22 @@ class AppController {
             this.renderAccountsUI();
         });
 
+        // Kompaktní trezor: formuláře jsou defaultně sbalené, tlačítko je jen odkryje.
+        bind("vaultSetupToggleBtn", "click", () => {
+            const form = document.getElementById("vaultSetupForm");
+            const willShow = form.style.display === "none";
+            form.style.display = willShow ? "block" : "none";
+            if (willShow) document.getElementById("vaultPasswordCreate").focus();
+        });
+        bind("vaultUnlockToggleBtn", "click", () => {
+            const form = document.getElementById("vaultUnlockForm");
+            const willShow = form.style.display === "none";
+            form.style.display = willShow ? "block" : "none";
+            if (willShow) document.getElementById("vaultPasswordInput").focus();
+        });
+        bind("vaultPasswordConfirm", "keypress", (e) => { if (e.key === "Enter") document.getElementById("createVaultBtn").click(); });
+        bind("vaultPasswordInput", "keypress", (e) => { if (e.key === "Enter") document.getElementById("unlockVaultBtn").click(); });
+
         bind("addContactBtn", "click", () => {
             const npub = document.getElementById("newContactInput").value.trim();
             if (!npub) return;
@@ -310,7 +326,7 @@ class AppController {
     async start() {
         try {
             const isNip07 = sessionStorage.getItem("loginMethod") === "nip07";
-            
+
             // 🛡️ Ochrana: Odmítneme nastartovat chybějící relaci
             if (isNip07 && !sessionStorage.getItem("myPubkey")) return;
             if (!isNip07 && !sessionStorage.getItem("myPrivHex")) return;
