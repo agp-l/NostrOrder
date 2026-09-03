@@ -86,6 +86,8 @@
     .vault-row-text small { display: block; font-weight: 500; color: #94a3b8; font-size: 0.7rem; margin-top: 1px; }
     .vault-form { margin-top: 10px; }
     .vault-btn-sm { border-radius: 10px; font-size: 0.78rem; font-weight: 700; padding: 6px 12px; white-space: nowrap; }
+
+    .app-lock-overlay { position: absolute; inset: 0; z-index: 50; background: rgba(17, 11, 26, 0.97); backdrop-filter: blur(8px); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; text-align: center; }
   </style>
 </head>
 <body>
@@ -181,6 +183,7 @@
           </button>
           <ul class="dropdown-menu dropdown-menu-end shadow border-0" style="border-radius: 12px; font-size: 0.9rem;">
             <li><button class="dropdown-item py-2 fw-medium" id="openSettingsBtn"><i class="bi bi-gear me-2 text-secondary"></i>Nastavení</button></li>
+            <li><button class="dropdown-item py-2 fw-bold text-purple" id="lockAppBtn"><i class="bi bi-lock-fill me-2"></i>Zamknout aplikaci</button></li>
             <li><button class="dropdown-item py-2 text-secondary fw-bold" id="logoutBtn"><i class="bi bi-people-fill me-2"></i>Přepnout účet</button></li>
           </ul>
         </div>
@@ -288,6 +291,18 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- ================== ZÁMEK APLIKACE (overlay přes vše) ================== -->
+    <div id="appLockOverlay" class="app-lock-overlay" style="display:none;">
+      <div class="login-logo mb-3"><i class="bi bi-lock-fill"></i></div>
+      <h5 class="fw-bold text-white mb-1">Aplikace je zamčená</h5>
+      <p class="text-white-50 small mb-4">Zadej heslo trezoru pro pokračování.</p>
+      <div class="input-group input-group-sm mb-3" style="max-width:260px;">
+        <input type="password" id="appLockPasswordInput" class="form-control" placeholder="Heslo trezoru" autocomplete="current-password">
+        <button id="appUnlockBtn" class="btn btn-purple px-3">Odemknout</button>
+      </div>
+      <button id="appLockLogoutBtn" class="btn btn-link btn-sm text-white-50">Zapomněl(a) jsem heslo — odhlásit</button>
     </div>
   </div>
 

@@ -155,6 +155,20 @@ class AppController {
         this.start();
     }
 
+    // 🔒 Overlay přes celou appku, dokud se nezadá heslo trezoru. Nejde o "znovu-přihlášení" —
+    // relace (websockety, dešifrovaný klíč v paměti NostrClient) běží dál na pozadí, jen se
+    // vizuálně schová obsah chatů, aby je nikdo nepovolaný neviděl bez hesla.
+    showAppLock(verifyPayload) {
+        this._appLockVerifyPayload = verifyPayload;
+        const overlay = document.getElementById("appLockOverlay");
+        if (overlay) overlay.style.display = "flex";
+    }
+
+    hideAppLock() {
+        const overlay = document.getElementById("appLockOverlay");
+        if (overlay) overlay.style.display = "none";
+    }
+
     bindEvents() {
         const bind = (id, event, handler) => {
             const el = document.getElementById(id);
@@ -194,6 +208,40 @@ class AppController {
         bind("openSettingsBtn", "click", () => this.ui.showScreen("settings"));
         bind("backFromSettingsBtn", "click", () => this.ui.showScreen("contacts"));
         bind("backToContactsBtn", "click", () => { this.store.activeChatPartnerHex = null; this.ui.showScreen("contacts"); });
+
+        // ===== Zámek aplikace (manuální) =====
+        bind("lockAppBtn", "click", () => {
+            if (!vault.hasVault()) {
+                return alert("Trezor ještě není nastavený. Odhlas se, na přihlašovací obrazovce klikni na „Nastavit heslo“ a pak se znovu přihlas.");
+            }
+            const entry = this.store.getSavedAccounts().find(a => a.pubkey === this.store.myPubkey);
+            if (!entry?.enc) {
+                return alert("Tenhle účet zatím není v trezoru zašifrovaný, nedá se jím zamknout.");
+            }
+            vault.lock();
+            this.showAppLock(entry.enc);
+        });
+
+        bind("appUnlockBtn", "click", async () => {
+            const pwd = document.getElementById("appLockPasswordInput").value;
+            if (!pwd) return;
+            try {
+                await vault.unlock(pwd, this._appLockVerifyPayload);
+                document.getElementById("appLockPasswordInput").value = "";
+                this.hideAppLock();
+            } catch (e) {
+                alert("Nesprávné heslo trezoru.");
+            }
+        });
+        bind("appLockPasswordInput", "keypress", (e) => { if (e.key === "Enter") document.getElementById("appUnlockBtn").click(); });
+
+        bind("appLockLogoutBtn", "click", () => {
+            if (confirm("Opravdu se odhlásit z aplikace? Příště se budeš muset přihlásit klíčem nebo rozšířením znovu.")) {
+                vault.lock();
+                sessionStorage.clear();
+                location.reload();
+            }
+        });
 
         bind("createVaultBtn", "click", async () => {
             const p1 = document.getElementById("vaultPasswordCreate").value;
@@ -336,6 +384,15 @@ class AppController {
             this.store.myPubkey = this.nostr.getPublicKeyHex();
             await this.store.saveAccount(sessionStorage.getItem("loginMethod"), sessionStorage.getItem("myPrivHex"));
             this.store.loadContacts();
+
+            // 🔒 Pokud je tenhle účet zašifrovaný v trezoru, appka se při KAŽDÉM (znovu)startu
+            // zamkne přes overlay, i když relace v sessionStorage běží dál na pozadí. Bez tohohle
+            // by po refreshi stránky trezor sice existoval, ale k ničemu by to nebylo — appka by
+            // vždycky nastartovala rovnou do chatů na klíči uloženém v sessionStorage.
+            const savedEntry = this.store.getSavedAccounts().find(a => a.pubkey === this.store.myPubkey);
+            if (savedEntry?.enc && vault.hasVault() && !vault.isUnlocked()) {
+                this.showAppLock(savedEntry.enc);
+            }
             
             document.getElementById("displayNpub").value = nip19.npubEncode(this.store.myPubkey);
             if (!isNip07) document.getElementById("displayNsec").value = nip19.nsecEncode(hexToBytes(sessionStorage.getItem("myPrivHex")));
