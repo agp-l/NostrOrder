@@ -2,8 +2,8 @@
 <html lang="cs">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Nostr Secure Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NostrOrder · Soukromý chat</title>
 
   <!-- 🔒 CSP: appka nemá žádné inline <script>, takže script-src může být přísný
        (bez 'unsafe-inline'). Inline style="" atributy zůstávají potřeba (Bootstrap
@@ -87,6 +87,14 @@
     .vault-form { margin-top: 10px; }
     .vault-btn-sm { border-radius: 10px; font-size: 0.78rem; font-weight: 700; padding: 6px 12px; white-space: nowrap; }
 
+    .message-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .chat-date { align-self: center; color: #64748b; font-size: .7rem; margin: 4px 0 16px; }
+    .connection-status, .composer-hint { padding: 6px 12px; font-size: .7rem; color: #64748b; text-align: center; background: #fff; }
+    .retry-message { display: block; margin-top: 6px; background: transparent; border: 1px solid currentColor; border-radius: 8px; color: inherit; padding: 4px 8px; font-size: .75rem; }
+    .retry-message:disabled { opacity: .6; }
+    #messageInput { resize: none; max-height: 140px; }
+    #chatWindow { min-height: 0; }
+    @media (prefers-reduced-motion: reduce) { body { animation: none; } .screen { transition: none; } }
     .app-lock-overlay { position: absolute; inset: 0; z-index: 50; background: rgba(17, 11, 26, 0.97); backdrop-filter: blur(8px); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; text-align: center; }
   </style>
 </head>
@@ -221,17 +229,15 @@
         </div>
       </div>
 
-      <div id="chatWindow">
-        <div class="text-center mt-auto mb-auto" id="chatStatus">
-          <div class="spinner-border spinner-border-sm text-purple mb-3" role="status"></div>
-          <p class="text-muted small mb-0 fw-medium">Načítám zprávy...</p>
-        </div>
-      </div>
+      <div id="connectionStatus" class="connection-status" role="status">Připojuji relaye…</div>
+      <div id="chatStatus" class="text-center text-muted small p-3" role="status"></div>
+      <div id="chatWindow" aria-label="Historie zpráv"></div>
 
       <div class="chat-footer">
-        <input type="text" id="messageInput" class="form-control input-pill" placeholder="Napiš zprávu..." disabled autocomplete="off" />
-        <button id="sendBtn" class="btn btn-send" disabled><i class="bi bi-send-fill"></i></button>
+        <textarea id="messageInput" class="form-control input-pill" rows="2" placeholder="Napiš zprávu…" aria-label="Zpráva" aria-describedby="composerHint" disabled></textarea>
+        <button id="sendBtn" aria-label="Odeslat zprávu" class="btn btn-send" disabled><i class="bi bi-send-fill"></i></button>
       </div>
+      <div id="composerHint" class="composer-hint">Enter odešle · Shift+Enter vloží nový řádek</div>
     </div>
 
     <!-- ================== SCREEN 4: SETTINGS ================== -->
@@ -282,12 +288,13 @@
           </div>
 
           <div class="tab-pane fade" id="tab-relays">
-            <p class="small text-muted mb-3">Servery doručují tvé zprávy. Po úpravě se seznam ihned rozešle.</p>
+            <p class="small text-muted mb-3">Servery doručují tvé zprávy. Připojení se změní ihned; po úpravě zveřejni seznam, aby kontakty věděly, kam psát.</p>
             <ul class="list-group list-group-flush mb-3 border-0 bg-transparent" id="relayListUI"></ul>
             <div class="input-group">
               <input type="text" id="newRelayInput" class="form-control bg-light border-0" placeholder="wss://relay...">
               <button class="btn btn-purple" id="addRelayBtn">Přidat</button>
             </div>
+            <button class="btn btn-purple-outline w-100 mt-3" id="publishRelaysBtn">Zveřejnit moje relaye</button>
           </div>
         </div>
       </div>
@@ -315,6 +322,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-  <script type="module" src="./js/app.js?v=6"></script>
+  <script type="module" src="./js/app.js?v=7"></script>
 </body>
 </html>

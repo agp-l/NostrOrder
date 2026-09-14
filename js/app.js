@@ -5,6 +5,7 @@ import { db } from './database.js';
 import { UIManager, Utils } from './ui.js';
 import { NostrClient } from './nostr.js';
 import { vault } from './vault.js';
+import { orderedMessages } from './messages.js';
 
 class Store {
     constructor() {
@@ -12,7 +13,7 @@ class Store {
         this.activeChatPartnerHex = null;
         this.contacts = [];
         this.messagesCache = [];
-        this.seenEvents = new Set();
+
     }
 
     loadContacts() {
@@ -74,12 +75,16 @@ class Store {
     }
 }
 
-class AppController {
+export class AppController {
     constructor() {
         // 🛡️ NEINICIALIZOVAT ZDE! Prohlížeč ještě nemusí mít vykreslené HTML
         this.store = null;
         this.ui = null;
         this.nostr = null;
+        this.sendingIds = new Set();
+        this.drafts = new Map();
+        this.preparingMessage = false;
+        this.chatLoadVersion = 0;
     }
 
     init() {
@@ -87,7 +92,13 @@ class AppController {
         this.store = new Store();
         this.ui = new UIManager();
         this.nostr = new NostrClient();
+        this.nostr.network.onStatus = (connected, total) => {
+            document.getElementById('connectionStatus').textContent = connected
+                ? 'Připojeno k ' + connected + ' z ' + total + ' relayů'
+                : 'Bez připojení · nepotvrzené zprávy můžeš odeslat znovu';
+        };
 
+        this.ui.showScreen("login");
         this.bindEvents();
         this.renderAccountsUI();
         if (sessionStorage.getItem("loginMethod")) this.start();
@@ -207,7 +218,7 @@ class AppController {
         bind("logoutBtn", "click", () => { vault.lock(); sessionStorage.clear(); location.reload(); });
         bind("openSettingsBtn", "click", () => this.ui.showScreen("settings"));
         bind("backFromSettingsBtn", "click", () => this.ui.showScreen("contacts"));
-        bind("backToContactsBtn", "click", () => { this.store.activeChatPartnerHex = null; this.ui.showScreen("contacts"); });
+        bind("backToContactsBtn", "click", () => { this.saveDraft(); this.chatLoadVersion++; this.store.activeChatPartnerHex = null; this.ui.showScreen("contacts"); });
 
         // ===== Zámek aplikace (manuální) =====
         bind("lockAppBtn", "click", () => {
@@ -315,31 +326,29 @@ class AppController {
         });
 
         bind("sendBtn", "click", () => this.sendMessage());
-        bind("messageInput", "keypress", (e) => { if (e.key === "Enter") this.sendMessage(); });
+        bind("messageInput", "keydown", (e) => {
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.sendMessage(); }
+        });
+        bind("messageInput", "input", () => this.saveDraft());
 
         bind("clearDbBtn", "click", async () => {
-            if (confirm("Opravdu smazat historii s tímto kontaktem?\nPokusíme se trvale smazat vámi odeslané zprávy i ze sítě (NIP-09).")) {
-                const history = await db.getMessages(this.store.myPubkey, this.store.activeChatPartnerHex);
-                
-                let wrapIdsToDelete = [];
-                history.filter(m => m.isMe && m.wrapIds).forEach(m => {
-                    wrapIdsToDelete.push(...m.wrapIds);
-                });
-
-                if (wrapIdsToDelete.length > 0) {
-                    await this.nostr.deleteEventsFromNetwork(wrapIdsToDelete);
-                }
-                
-                await db.deleteChat(this.store.myPubkey, this.store.activeChatPartnerHex);
-                location.reload();
+            const partner = this.store.activeChatPartnerHex;
+            if (this.sendingIds.size || this.preparingMessage) return alert('Počkej na dokončení odesílání.');
+            if (partner && confirm('Smazat historii s tímto kontaktem z tohoto zařízení? Kopie na relayích a u příjemce zůstanou a při další synchronizaci se mohou znovu načíst.')) {
+                try {
+                    await db.deleteChat(this.store.myPubkey, partner);
+                    if (this.store.activeChatPartnerHex === partner) { this.store.messagesCache = []; this.renderChat(); }
+                } catch { alert('Historii se nepodařilo smazat.'); }
             }
         });
 
         bind("saveProfileBtn", "click", async () => {
             const name = document.getElementById("profileName").value.trim();
-            await this.nostr.publishProfile(name, document.getElementById("profileAbout").value.trim(), document.getElementById("profilePicture").value.trim());
-            this.store.updateAccountLabel(name);
-            alert("Profil úspěšně uložen do sítě!");
+            try {
+                await this.nostr.publishProfile(name, document.getElementById("profileAbout").value.trim(), document.getElementById("profilePicture").value.trim());
+                this.store.updateAccountLabel(name);
+                alert("Relay potvrdil uložení profilu.");
+            } catch (error) { alert(error.message); }
         });
 
         bind("copyNpubBtn", "click", () => { navigator.clipboard.writeText(document.getElementById("displayNpub").value); alert("Klíč zkopírován!"); });
@@ -348,6 +357,15 @@ class AppController {
             const i = document.getElementById("displayNsec"); const ic = e.currentTarget.querySelector("i");
             if (i.type === "password") { i.type = "text"; ic.className = "bi bi-eye-slash text-purple"; } 
             else { i.type = "password"; ic.className = "bi bi-eye text-purple"; }
+        });
+
+        bind("publishRelaysBtn", "click", async (event) => {
+            event.currentTarget.disabled = true;
+            try {
+                await this.nostr.publishRelayLists();
+                alert('Relay potvrdil zveřejnění tvé schránky pro soukromé zprávy.');
+            } catch (error) { alert(error.message); }
+            finally { document.getElementById('publishRelaysBtn').disabled = false; }
         });
 
         bind("addRelayBtn", "click", () => {
@@ -418,19 +436,15 @@ class AppController {
                         this.ui.renderContacts(this.store.contacts, (n, d, p) => this.openChat(n, d, p), npub => this.deleteContact(npub));
                         this.updateContactProfiles();
                     }
-                    if (!this.store.seenEvents.has(msgObj.id)) {
-                        this.store.seenEvents.add(msgObj.id);
-                        await db.saveMessage(msgObj);
-                        if (this.store.activeChatPartnerHex === msgObj.partnerPubkey) {
-                            this.ui.chatStatus.style.display = "none";
-                            this.store.messagesCache.push(msgObj);
-                            this.ui.renderMessages(this.store.messagesCache);
-                        }
+                    const saved = await db.saveMessage(msgObj);
+                    if (this.store.activeChatPartnerHex === saved.partnerPubkey) {
+                        this.mergeMessages([saved]);
+                        this.renderChat();
                     }
                 }
             });
 
-            if (!isNip07) setTimeout(() => this.nostr.publishRelayLists(), 2000);
+            if (!isNip07) setTimeout(() => this.nostr.publishRelayLists().catch(error => Utils.log('ERROR', error.message)), 2000);
             this.updateContactProfiles();
         } catch (e) { Utils.log("ERROR", "Kritická chyba při startu chatu.", e); }
     }
@@ -476,40 +490,96 @@ class AppController {
         this.ui.renderRelays(this.nostr.relays, idx => this.removeRelay(idx));
     }
 
+    saveDraft() {
+        if (this.store.activeChatPartnerHex) this.drafts.set(this.store.activeChatPartnerHex, document.getElementById('messageInput').value);
+    }
+
+    mergeMessages(messages) {
+        this.store.messagesCache = orderedMessages([...this.store.messagesCache, ...messages]);
+    }
+
+    renderChat(scrollToBottom = false) {
+        this.ui.renderMessages(this.store.messagesCache, { scrollToBottom, onRetry: msg => this.deliverMessage(msg), sendingIds: this.sendingIds });
+    }
+
     async openChat(npub, displayName, picture) {
-        this.store.activeChatPartnerHex = nip19.decode(npub).data;
+        this.saveDraft();
+        const partner = nip19.decode(npub).data;
+        const version = ++this.chatLoadVersion;
+        this.store.activeChatPartnerHex = partner;
         this.ui.updateChatHeader(displayName, picture);
-        this.ui.showScreen("chat");
+        this.ui.showScreen('chat');
         this.store.messagesCache = [];
-        this.ui.chatWindow.innerHTML = '';
-        this.ui.chatStatus.style.display = "block";
-        
-        const history = await db.getMessages(this.store.myPubkey, this.store.activeChatPartnerHex);
-        this.ui.chatStatus.style.display = "none";
-        if (history.length > 0) {
-            history.forEach(msg => { this.store.seenEvents.add(msg.id); this.store.messagesCache.push(msg); });
-            this.ui.renderMessages(this.store.messagesCache);
+        this.ui.chatWindow.replaceChildren();
+        this.ui.setChatStatus('Načítám zprávy…');
+        const input = document.getElementById('messageInput');
+        input.value = this.drafts.get(partner) || '';
+        input.disabled = true;
+        document.getElementById('sendBtn').disabled = true;
+        try {
+            const history = await db.getMessages(this.store.myPubkey, partner);
+            if (version !== this.chatLoadVersion) return;
+            // Live messages may have arrived while IndexedDB was loading.
+            this.store.messagesCache = orderedMessages([...history, ...this.store.messagesCache]);
+            this.renderChat(true);
+            input.disabled = false;
+            document.getElementById('sendBtn').disabled = this.preparingMessage;
+        } catch {
+            if (version === this.chatLoadVersion) this.ui.setChatStatus('Historii se nepodařilo načíst. Otevři chat znovu.');
         }
-        document.getElementById("messageInput").disabled = false;
-        document.getElementById("sendBtn").disabled = false;
+    }
+
+    async deliverMessage(message) {
+        if (!message.outbox || this.sendingIds.has(message.id)) return;
+        this.sendingIds.add(message.id);
+        if (this.store.activeChatPartnerHex === message.partnerPubkey) this.renderChat();
+        let updated;
+        try {
+            updated = await this.nostr.publishMessage(message);
+        } catch (error) {
+            updated = { ...message, status: message.status === 'sent' ? 'sent' : 'failed' };
+            Utils.log('ERROR', error.message);
+            alert(error.message);
+        }
+        try {
+            updated = await db.saveMessage(updated);
+            if (this.store.activeChatPartnerHex === updated.partnerPubkey) this.mergeMessages([updated]);
+        } catch { alert('Stav odeslání se nepodařilo uložit. Původní zpráva zůstává v historii jako nepotvrzená.'); }
+        finally {
+            this.sendingIds.delete(message.id);
+            if (this.store.activeChatPartnerHex === message.partnerPubkey) this.renderChat();
+        }
     }
 
     async sendMessage() {
-        const input = document.getElementById("messageInput");
+        const input = document.getElementById('messageInput');
         const text = input.value.trim();
-        if (!text || !this.store.activeChatPartnerHex) return;
-        
-        input.disabled = true;
+        const partner = this.store.activeChatPartnerHex;
+        if (!text || !partner || input.disabled || this.preparingMessage) return;
+        const originalDraft = input.value;
+        this.preparingMessage = true;
+        document.getElementById('sendBtn').disabled = true;
+        let message;
         try {
-            const msgObj = await this.nostr.sendNip59Message(text, this.store.activeChatPartnerHex);
-            this.store.seenEvents.add(msgObj.id);
-            this.store.messagesCache.push(msgObj);
-            this.ui.renderMessages(this.store.messagesCache);
-            await db.saveMessage(msgObj);
-            input.value = "";
-        } catch (e) { alert("Odeslání selhalo."); }
-        finally { input.disabled = false; input.focus(); }
+            message = await this.nostr.prepareNip59Message(text, partner);
+            // Save the signed envelopes before attempting publication.
+            message = await db.saveMessage(message);
+            if (this.drafts.get(partner) === originalDraft) this.drafts.delete(partner);
+            if (this.store.activeChatPartnerHex === partner) {
+                if (input.value === originalDraft) input.value = '';
+                this.mergeMessages([message]);
+                this.renderChat(true);
+            }
+        } catch (error) {
+            message = null;
+            alert('Zprávu se nepodařilo připravit nebo uložit. Text zůstává rozepsaný. ' + error.message);
+        } finally {
+            this.preparingMessage = false;
+            document.getElementById('sendBtn').disabled = input.disabled;
+        }
+        if (message) await this.deliverMessage(message);
     }
+
 }
 
 // 🚀 Aplikaci teď spouštíme až když je HTML skutečně připraveno

@@ -2,7 +2,7 @@
 export class Utils {
     static escapeHTML(str) {
         if (!str) return "";
-        return str.replace(/[&<>'"]/g, tag => ({
+        return String(str).replace(/[&<>'"]/g, tag => ({
             '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
         }[tag] || tag));
     }
@@ -70,6 +70,8 @@ export class UIManager {
         const targetScreen = this.screens[screenName];
         Object.values(this.screens).forEach(s => {
             if (s) {
+                s.inert = s !== targetScreen;
+                s.setAttribute("aria-hidden", String(s !== targetScreen));
                 s.classList.remove("screen-active");
                 if (s !== targetScreen) s.classList.add("screen-hidden-right");
             }
@@ -172,16 +174,50 @@ export class UIManager {
         });
     }
 
-    renderMessages(messages) {
-        this.chatWindow.innerHTML = ''; 
+    setChatStatus(text) {
+        this.chatStatus.textContent = text;
+        this.chatStatus.style.display = text ? 'block' : 'none';
+    }
+
+    renderMessages(messages, { scrollToBottom = false, onRetry = () => {}, sendingIds = new Set() } = {}) {
+        const wasNearBottom = this.chatWindow.scrollHeight - this.chatWindow.scrollTop - this.chatWindow.clientHeight < 80;
+        const previousScroll = this.chatWindow.scrollTop;
+        this.chatWindow.replaceChildren();
+        let lastDay = '';
         messages.forEach(msg => {
-            const timeStr = new Date(msg.timestamp * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-            const bubble = document.createElement("div");
-            bubble.className = `msg-bubble shadow-sm ${msg.isMe ? 'msg-out' : 'msg-in'}`;
-            bubble.innerHTML = `<div>${Utils.escapeHTML(msg.text)}</div><span class="time-stamp">${timeStr}</span>`;
+            const date = new Date(msg.timestamp * 1000);
+            const day = date.toLocaleDateString('cs-CZ');
+            if (day !== lastDay) {
+                const separator = document.createElement('div');
+                separator.className = 'chat-date';
+                separator.textContent = day;
+                this.chatWindow.appendChild(separator);
+                lastDay = day;
+            }
+            const bubble = document.createElement('div');
+            bubble.className = 'msg-bubble shadow-sm ' + (msg.isMe ? 'msg-out' : 'msg-in');
+            const body = document.createElement('div');
+            body.className = 'message-text';
+            body.textContent = msg.text;
+            const time = document.createElement('span');
+            time.className = 'time-stamp';
+            const busy = sendingIds.has(msg.id);
+            const status = busy ? 'Odesílání…' : msg.status === 'sent' ? 'Přijato relayem' : msg.outbox ? 'Nepotvrzeno' : '';
+            time.textContent = date.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' }) + (status ? ' · ' + status : '');
+            time.title = 'Přijetí relayem nepotvrzuje přečtení příjemcem.';
+            bubble.append(body, time);
+            if (msg.outbox) {
+                const retry = document.createElement('button');
+                retry.className = 'retry-message';
+                retry.textContent = msg.status === 'sent' ? 'Znovu synchronizovat' : 'Zkusit znovu';
+                retry.disabled = busy;
+                retry.addEventListener('click', () => onRetry(msg));
+                bubble.appendChild(retry);
+            }
             this.chatWindow.appendChild(bubble);
         });
-        this.chatWindow.scrollTop = this.chatWindow.scrollHeight;
+        this.setChatStatus(messages.length ? '' : 'Zatím žádné zprávy. Napiš první zprávu.');
+        this.chatWindow.scrollTop = scrollToBottom || wasNearBottom ? this.chatWindow.scrollHeight : previousScroll;
     }
 
     renderRelays(relaysArray, onRemoveRelay) {
