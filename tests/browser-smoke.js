@@ -118,8 +118,13 @@ try {
         await page.locator('#backToContactsBtn').click();
         await page.locator('.contact-item').filter({hasText:'Bob'}).click();
         assert.equal(await input.inputValue(),'Rozepsáno pro Boba');
+        // Screen navigation animates for 300 ms; wait for the composer to settle.
+        await page.waitForFunction(()=>{
+            const rect=document.getElementById('sendBtn').getBoundingClientRect();
+            return rect.width>0&&rect.x>=0&&rect.y>=0&&rect.right<=innerWidth&&rect.bottom<=innerHeight;
+        });
         const box=await page.locator('#sendBtn').boundingBox();
-        assert.ok(box&&box.x>=0&&box.y>=0&&box.x+box.width<=viewport.width&&box.y+box.height<=viewport.height);
+        assert.ok(box&&box.x>=0&&box.y>=0&&box.x+box.width<=viewport.width&&box.y+box.height<=viewport.height,JSON.stringify({box,viewport}));
         assert.deepEqual(errors,[]);
         console.log('PASS browser flow '+viewport.width+'x'+viewport.height+': multiline, reject, reload, same-ID retry, drafts, visible composer');
         await context.close();
