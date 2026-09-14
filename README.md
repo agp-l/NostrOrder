@@ -49,9 +49,11 @@ Node.js 22 nebo novější:
 npm install --ignore-scripts
 npm run check
 npm test
+npx playwright install chromium
+npm run test:browser
 ```
 
-Testy ověřují skutečné šifrování a dešifrování s připnutou knihovnou nostr-tools, podvržené zprávy, potvrzení relayů, výpadky, opakování, slučování IndexedDB záznamů a souběžné akce v chatu. Síťová část používá simulované relaye. GitHub Actions spouští tuto sadu při pushi a pull requestu.
+Testy ověřují skutečné šifrování a dešifrování s připnutou knihovnou nostr-tools, podvržené zprávy, potvrzení relayů, výpadky, opakování, slučování IndexedDB záznamů a souběžné akce v chatu. Síťová část používá simulované relaye. Test pro Chromium navíc otevírá skutečnou stránku na mobilním a desktopovém rozměru a kontroluje víceřádkové psaní, odmítnutí zprávy, reload, opakování se stejnými ID a rozepsané texty. Externí síť je v testovacím prohlížeči blokovaná; stejné připnuté závislosti se pro test načtou místně. GitHub Actions spouští tuto sadu při pushi a pull requestu.
 
 ## Protokoly
 
