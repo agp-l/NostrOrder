@@ -2,8 +2,10 @@
 import { getPublicKey, finalizeEvent, generateSecretKey, getEventHash, verifyEvent, nip04, nip44 } from 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
 import { hexToBytes, bytesToHex } from 'https://cdn.jsdelivr.net/npm/@noble/hashes@1.3.0/utils/+esm';
 import { Utils } from './ui.js';
+import { NostrNetwork, normalizeRelay } from './network.js';
+import { directChatPartner } from './message-validation.js';
 
-class NostrCrypto {
+export class NostrCrypto {
     static generateAccount() {
         const sk = generateSecretKey();
         return bytesToHex(sk);
@@ -15,7 +17,10 @@ class NostrCrypto {
     }
 
     static async decryptEvent(ev, myPubkeyHex, myPrivBytes, isNip07) {
+        try { if (!ev || !verifyEvent(ev)) return null; } catch { return null; }
+        const addressedToMe = ev.tags.some(tag => tag[0] === 'p' && tag[1] === myPubkeyHex);
         if (ev.kind === 4) {
+            if (ev.pubkey !== myPubkeyHex && !addressedToMe) return null;
             const isMe = ev.pubkey === myPubkeyHex;
             const partner = isMe ? (ev.tags.find(t => t[0] === 'p')?.[1]) : ev.pubkey;
             if (!partner) return null;
@@ -26,6 +31,7 @@ class NostrCrypto {
         }
 
         if (ev.kind === 1059) {
+            if (!addressedToMe) return null;
             try {
                 const sealJson = isNip07 ? await window.nostr.nip44.decrypt(ev.pubkey, ev.content) : nip44.decrypt(ev.content, nip44.getConversationKey(myPrivBytes, ev.pubkey));
                 const sealEvent = JSON.parse(sealJson);
@@ -39,6 +45,8 @@ class NostrCrypto {
                 const gossipEvent = JSON.parse(gossipJson);
 
                 if (gossipEvent.kind === 14) {
+                    const partner = directChatPartner(gossipEvent, sealEvent.pubkey, myPubkeyHex);
+                    if (!partner) return null;
                     // 🔒 Gossip (kind 14) je dle NIP-17 záměrně nepodepsaný, ale jeho `id`
                     // je pořád hash obsahu — dopočítáme ho a porovnáme, abychom odhalili
                     // jakoukoliv manipulaci s obsahem/časem zprávy po cestě.
@@ -55,8 +63,6 @@ class NostrCrypto {
                     }
 
                     const isMe = sealEvent.pubkey === myPubkeyHex;
-                    const partner = isMe ? (gossipEvent.tags.find(t => t[0] === 'p')?.[1]) : sealEvent.pubkey;
-                    if (!partner) return null;
 
                     // Ukládáme i wrapIds (ID vnějšího obalu, které znají servery).
                     return { id: gossipEvent.id, wrapIds: [ev.id], text: gossipEvent.content, isMe, timestamp: gossipEvent.created_at, partnerPubkey: partner, ownerPubkey: myPubkeyHex };
@@ -64,73 +70,6 @@ class NostrCrypto {
             } catch (e) { return null; }
         }
         return null;
-    }
-}
-
-class NostrNetwork {
-    constructor() {
-        this.sockets = new Map();
-        this.subscriptions = new Map();
-        this.partnerRelays = new Map();
-    }
-
-    cachePartnerRelay(pubkey, url) {
-        if (!this.partnerRelays.has(pubkey)) this.partnerRelays.set(pubkey, new Set());
-        this.partnerRelays.get(pubkey).add(url);
-    }
-
-    addSubscription(subId, filters) {
-        const reqMsg = JSON.stringify(["REQ", subId, ...filters]);
-        this.subscriptions.set(subId, reqMsg);
-        this.sockets.forEach(ws => { if (ws.readyState === WebSocket.OPEN) ws.send(reqMsg); });
-    }
-
-    removeSubscription(subId) {
-        this.subscriptions.delete(subId);
-        const closeMsg = JSON.stringify(["CLOSE", subId]);
-        this.sockets.forEach(ws => { if (ws.readyState === WebSocket.OPEN) ws.send(closeMsg); });
-    }
-
-    sendEvent(eventMsgString, targetPubkey = null) {
-        this.sockets.forEach(ws => { if (ws.readyState === WebSocket.OPEN) ws.send(eventMsgString); });
-        
-        if (targetPubkey && this.partnerRelays.has(targetPubkey)) {
-            this.partnerRelays.get(targetPubkey).forEach(url => {
-                if (this.sockets.has(url)) return;
-                try {
-                    const tempWs = new WebSocket(url);
-                    tempWs.onopen = () => { tempWs.send(eventMsgString); setTimeout(() => tempWs.close(), 3000); };
-                    tempWs.onerror = () => {};
-                } catch(e) {}
-            });
-        }
-    }
-
-    ensureConnections(relaysArray, onEventData) {
-        relaysArray.forEach(url => {
-            if (this.sockets.has(url) && [WebSocket.OPEN, WebSocket.CONNECTING].includes(this.sockets.get(url).readyState)) return;
-            
-            const ws = new WebSocket(url);
-            this.sockets.set(url, ws);
-
-            ws.onopen = () => {
-                Utils.log('INFO', `Připojeno k ${url}`);
-                this.subscriptions.forEach(req => ws.send(req));
-            };
-
-            ws.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    if (data[0] === "EVENT") onEventData(data[1], data[2]);
-                } catch(e) {}
-            };
-
-            ws.onclose = () => {
-                this.sockets.delete(url);
-                setTimeout(() => this.ensureConnections(relaysArray, onEventData), 5000);
-            };
-            ws.onerror = () => {};
-        });
     }
 }
 
@@ -144,7 +83,10 @@ export class NostrClient {
         this.profileCallbacks = new Map();
         
         const defaultRelays = ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band", "wss://relay.primal.net"];
-        this.relays = JSON.parse(localStorage.getItem("my_nostr_relays")) || defaultRelays;
+        let saved;
+        try { saved = JSON.parse(localStorage.getItem("my_nostr_relays")); } catch {}
+        this.relays = [...new Set((Array.isArray(saved) ? saved : defaultRelays).map(normalizeRelay).filter(Boolean))];
+        this.profileVersions = new Map();
     }
 
     generateNewAccount() {
@@ -166,40 +108,48 @@ export class NostrClient {
     getPublicKeyHex() { return this.pubHex; }
 
     saveRelays(newRelays) {
-        this.relays = newRelays;
+        this.relays = [...new Set(newRelays.map(normalizeRelay).filter(Boolean))];
         localStorage.setItem("my_nostr_relays", JSON.stringify(this.relays));
+        this.network.ensureConnections(this.relays);
     }
 
     async handleNetworkEvent(subId, ev) {
         // 🔒 Ověření podpisu HNED na vstupu. Relay je nedůvěryhodný prostředník —
         // bez tohoto by se dal podvrhnout kind 0 (profil), kind 4/1059 (zprávy)
         // i kind 10002/10050 (relay listy) s cizí `pubkey`, ale bez platného podpisu.
-        if (!verifyEvent(ev)) {
-            Utils.log('ERROR', '⚠️ Odmítnuta událost s neplatným podpisem.', { id: ev.id, kind: ev.kind });
+        let valid = false;
+        try { valid = !!ev && verifyEvent(ev); } catch {}
+        if (!valid) {
+            Utils.log('ERROR', '⚠️ Odmítnuta událost s neplatným podpisem.', { id: ev?.id, kind: ev?.kind });
             return;
         }
 
+        let profile;
+        if (ev.kind === 0) {
+            try { profile = JSON.parse(ev.content); } catch { return; }
+            if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return;
+            profile = Object.fromEntries(['name', 'about', 'picture'].map(key => [key, typeof profile[key] === 'string' ? profile[key] : '']));
+            const previous = this.profileVersions.get(ev.pubkey);
+            if (previous && (previous.created_at > ev.created_at || (previous.created_at === ev.created_at && previous.id < ev.id))) return;
+            this.profileVersions.set(ev.pubkey, { id: ev.id, created_at: ev.created_at });
+        }
         if (subId.startsWith("profiles-sync-")) {
             if (ev.kind === 0 && this.profileCallbacks.has(subId)) {
-                this.profileCallbacks.get(subId)(ev.pubkey, JSON.parse(ev.content));
-            } else if (ev.kind === 10050 || ev.kind === 10002) {
-                ev.tags.forEach(t => {
-                    if ((t[0] === 'relay' || t[0] === 'r') && t[1] && !(ev.kind === 10002 && t[2] === 'write')) {
-                        this.network.cachePartnerRelay(ev.pubkey, t[1]);
-                    }
-                });
+                this.profileCallbacks.get(subId)(ev.pubkey, profile);
+            } else if (ev.kind === 10050) {
+                this.network.updatePartnerRelays(ev);
             }
             return;
         }
 
         if (ev.kind === 0 && ev.pubkey === this.pubHex) {
-            this.onMessageCallback({ type: 'profile', data: JSON.parse(ev.content) });
+            await this.onMessageCallback({ type: 'profile', data: profile });
             return;
         }
 
         if (subId === "global-sync") {
             const msgObj = await NostrCrypto.decryptEvent(ev, this.pubHex, this.privBytes, this.isNip07);
-            if (msgObj) this.onMessageCallback({ type: 'message', data: msgObj });
+            if (msgObj) await this.onMessageCallback({ type: 'message', data: msgObj });
         }
     }
 
@@ -215,63 +165,89 @@ export class NostrClient {
         this.network.ensureConnections(this.relays, (id, ev) => this.handleNetworkEvent(id, ev));
     }
 
-    async sendNip59Message(text, partnerHex) {
+    async prepareNip59Message(text, partnerHex) {
+        if (!/^[a-f0-9]{64}$/.test(partnerHex)) throw new Error('Neplatný příjemce.');
+        if (this.isNip07 && !window.nostr?.nip44?.encrypt) throw new Error('Rozšíření nepodporuje šifrování NIP-44.');
         const now = Math.floor(Date.now() / 1000);
         // 🔒 Math.random() není kryptograficky bezpečný generátor — pro nonce používáme
         // crypto.getRandomValues (Web Crypto API), stejně jako pro IV/salt jinde v appce.
         const nonce = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
         const gossipTemplate = { kind: 14, pubkey: this.pubHex, created_at: now, tags: [["p", partnerHex], ["nonce", nonce]], content: text };
-        const gossipEvent = { ...gossipTemplate, id: getEventHash(gossipTemplate), sig: "" };
+        const gossipEvent = { ...gossipTemplate, id: getEventHash(gossipTemplate) };
         const expTime = (now + (14 * 24 * 60 * 60)).toString();
 
+        const randomTimestamp = () => now - Math.floor(crypto.getRandomValues(new Uint32Array(1))[0] / 2 ** 32 * 172800);
         const wrap = async (receiverHex) => {
             let sealContent = this.isNip07 ? await window.nostr.nip44.encrypt(receiverHex, JSON.stringify(gossipEvent)) : nip44.encrypt(JSON.stringify(gossipEvent), nip44.getConversationKey(this.privBytes, receiverHex));
-            const sealEvent = await NostrCrypto.signEvent({ kind: 13, created_at: now - Math.floor(Math.random() * 3600), tags: [], content: sealContent }, this.pubHex, this.privBytes, this.isNip07);
+            const sealEvent = await NostrCrypto.signEvent({ kind: 13, created_at: randomTimestamp(), tags: [], content: sealContent }, this.pubHex, this.privBytes, this.isNip07);
             const ephemeralPriv = generateSecretKey();
             const wrapContent = nip44.encrypt(JSON.stringify(sealEvent), nip44.getConversationKey(ephemeralPriv, receiverHex));
-            return finalizeEvent({ kind: 1059, created_at: now, tags: [["p", receiverHex], ["expiration", expTime]], content: wrapContent }, ephemeralPriv);
+            return finalizeEvent({ kind: 1059, created_at: randomTimestamp(), tags: [["p", receiverHex], ["expiration", expTime]], content: wrapContent }, ephemeralPriv);
         };
 
         const partnerWrap = await wrap(partnerHex);
         const selfWrap = await wrap(this.pubHex);
 
-        this.network.sendEvent(JSON.stringify(["EVENT", partnerWrap]), partnerHex);
-        this.network.sendEvent(JSON.stringify(["EVENT", selfWrap]));
+        return { id: gossipEvent.id, wrapIds: [partnerWrap.id, selfWrap.id], text, isMe: true,
+            timestamp: now, partnerPubkey: partnerHex, ownerPubkey: this.pubHex,
+            status: 'pending', outbox: { partnerWrap, selfWrap } };
+    }
 
-        Utils.log('SUCCESS', "📤 Odesláno (NIP-59).");
-        
-        // Vracíme i wrapIds obou obalů do databáze
-        return { id: gossipEvent.id, wrapIds: [partnerWrap.id, selfWrap.id], text, isMe: true, timestamp: now, partnerPubkey: partnerHex, ownerPubkey: this.pubHex };
+    async publishMessage(message) {
+        if (message.ownerPubkey !== this.pubHex) throw new Error('Zpráva patří jinému účtu.');
+        const { partnerWrap, selfWrap } = message.outbox;
+        if (Number(partnerWrap.tags.find(t => t[0] === 'expiration')?.[1]) <= Date.now() / 1000) {
+            throw new Error('Platnost zprávy vypršela. Zkopíruj text a odešli novou zprávu.');
+        }
+        // Reuse the original envelopes so retries have identical event IDs.
+        let recipients = [];
+        if (message.status !== 'sent') {
+            if (message.partnerPubkey === this.pubHex) recipients = this.relays;
+            else {
+                if (!this.network.partnerRelays.has(message.partnerPubkey)) {
+                    await new Promise(resolve => this.fetchProfiles([message.partnerPubkey], () => {}, resolve));
+                }
+                recipients = [...(this.network.partnerRelays.get(message.partnerPubkey) || [])];
+            }
+            if (!recipients.length) throw new Error('Kontakt nemá zveřejněný relay pro soukromé zprávy (NIP-17).');
+        }
+        const [recipient, self] = await Promise.allSettled([
+            message.status === 'sent' ? Promise.resolve() : this.network.publish(partnerWrap, recipients),
+            message.selfSynced ? Promise.resolve() : this.network.publish(selfWrap, this.relays)
+        ]);
+        const sent = recipient.status === 'fulfilled';
+        const synced = self.status === 'fulfilled';
+        return { ...message, status: sent ? 'sent' : 'failed', selfSynced: synced,
+            outbox: sent && synced ? null : message.outbox };
     }
 
     async publishProfile(name, about, picture) {
         const now = Math.floor(Date.now() / 1000);
         const ev = await NostrCrypto.signEvent({ kind: 0, created_at: now, tags: [], content: JSON.stringify({ name, about, picture }) }, this.pubHex, this.privBytes, this.isNip07);
-        this.network.sendEvent(JSON.stringify(["EVENT", ev]));
+        await this.network.publish(ev);
     }
 
     async publishRelayLists() {
         const now = Math.floor(Date.now() / 1000);
         const ev10002 = await NostrCrypto.signEvent({ kind: 10002, created_at: now, tags: this.relays.map(url => ["r", url]), content: "" }, this.pubHex, this.privBytes, this.isNip07);
         const ev10050 = await NostrCrypto.signEvent({ kind: 10050, created_at: now, tags: this.relays.map(url => ["relay", url]), content: "" }, this.pubHex, this.privBytes, this.isNip07);
-        this.network.sendEvent(JSON.stringify(["EVENT", ev10002]));
-        this.network.sendEvent(JSON.stringify(["EVENT", ev10050]));
+        await Promise.all([this.network.publish(ev10002), this.network.publish(ev10050)]);
     }
 
-    fetchProfiles(pubkeysHex, callback) {
+    fetchProfiles(pubkeysHex, callback, onComplete = () => {}) {
         if (!pubkeysHex || pubkeysHex.length === 0) return;
         const subId = "profiles-sync-" + Math.random().toString(36).substring(7);
         this.profileCallbacks.set(subId, callback);
         this.network.addSubscription(subId, [{ kinds: [0, 10002, 10050], authors: pubkeysHex }]);
         this.network.ensureConnections(this.relays, (id, ev) => this.handleNetworkEvent(id, ev));
-        setTimeout(() => { this.network.removeSubscription(subId); this.profileCallbacks.delete(subId); }, 10000);
+        setTimeout(() => { this.network.removeSubscription(subId); this.profileCallbacks.delete(subId); onComplete(); }, 10000);
     }
 
     async deleteEventsFromNetwork(eventIds) {
         if (!eventIds || eventIds.length === 0) return;
         const now = Math.floor(Date.now() / 1000);
         const ev = await NostrCrypto.signEvent({ kind: 5, created_at: now, tags: eventIds.map(id => ["e", id]), content: "Smazáno uživatelem" }, this.pubHex, this.privBytes, this.isNip07);
-        this.network.sendEvent(JSON.stringify(["EVENT", ev]));
+        await this.network.publish(ev);
         Utils.log('INFO', `🗑️ Požadavek na smazání ${eventIds.length} zpráv (NIP-09) odeslán.`);
     }
 }

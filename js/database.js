@@ -1,3 +1,4 @@
+import { mergeMessageRecords } from './messages.js';
 // js/database.js
 //
 // Bezpečnostní/audit poznámka (viz srovnání dvou verzí, které jsi poslal):
@@ -89,10 +90,16 @@ export class Database {
         const db = await this.getDB();
         return new Promise((resolve, reject) => {
             const tx = db.transaction(this.storeName, 'readwrite');
-            tx.oncomplete = () => resolve();
+            let saved;
+            tx.oncomplete = () => resolve(saved);
             tx.onerror = () => reject(tx.error || new Error('Uložení zprávy selhalo.'));
             tx.onabort = () => reject(tx.error || new Error('Uložení zprávy bylo zrušeno.'));
-            tx.objectStore(this.storeName).put(msgObj);
+            const store = tx.objectStore(this.storeName);
+            const request = store.get([msgObj.ownerPubkey, msgObj.id]);
+            request.onsuccess = () => {
+                saved = mergeMessageRecords(request.result, msgObj);
+                store.put(saved);
+            };
         });
     }
 
