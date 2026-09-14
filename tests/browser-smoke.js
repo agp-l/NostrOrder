@@ -131,7 +131,6 @@ try {
                         width:style.width,height:style.height,transform:style.transform,flex:style.flex};
                 })
             }))));
-            console.error('After clearing frame scroll',JSON.stringify(await page.evaluate(()=>{const frame=document.querySelector('.mobile-frame');frame.scrollLeft=0;frame.scrollTop=0;return document.getElementById('sendBtn').getBoundingClientRect().toJSON();})));
             throw error;
         });
         const box=await page.locator('#sendBtn').boundingBox();
