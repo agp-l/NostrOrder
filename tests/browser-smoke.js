@@ -123,14 +123,15 @@ try {
             const rect=document.getElementById('sendBtn').getBoundingClientRect();
             return rect.width>0&&rect.x>=0&&rect.y>=0&&rect.right<=innerWidth&&rect.bottom<=innerHeight;
         },null,{timeout:5000}).catch(async error=>{
-            console.error('Composer layout',await page.evaluate(()=>({
+            console.error('Composer layout',JSON.stringify(await page.evaluate(()=>({
                 viewport:{width:innerWidth,height:innerHeight},
                 elements:['.mobile-frame','#chatScreen','#chatWindow','.chat-footer','#messageInput','#sendBtn'].map(selector=>{
                     const element=document.querySelector(selector),style=getComputedStyle(element);
-                    return {selector,rect:element.getBoundingClientRect().toJSON(),minWidth:style.minWidth,
+                    return {selector,rect:element.getBoundingClientRect().toJSON(),scrollLeft:element.scrollLeft,scrollTop:element.scrollTop,minWidth:style.minWidth,
                         width:style.width,height:style.height,transform:style.transform,flex:style.flex};
                 })
-            })));
+            }))));
+            console.error('After clearing frame scroll',JSON.stringify(await page.evaluate(()=>{const frame=document.querySelector('.mobile-frame');frame.scrollLeft=0;frame.scrollTop=0;return document.getElementById('sendBtn').getBoundingClientRect().toJSON();})));
             throw error;
         });
         const box=await page.locator('#sendBtn').boundingBox();
