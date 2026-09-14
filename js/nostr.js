@@ -2,6 +2,7 @@
 import { getPublicKey, finalizeEvent, generateSecretKey, getEventHash, verifyEvent, nip04, nip44 } from 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
 import { hexToBytes, bytesToHex } from 'https://cdn.jsdelivr.net/npm/@noble/hashes@1.3.0/utils/+esm';
 import { Utils } from './ui.js';
+import { directChatPartner } from './message-validation.js';
 
 class NostrCrypto {
     static generateAccount() {
@@ -15,7 +16,10 @@ class NostrCrypto {
     }
 
     static async decryptEvent(ev, myPubkeyHex, myPrivBytes, isNip07) {
+        try { if (!ev || !verifyEvent(ev)) return null; } catch { return null; }
+        const addressedToMe = ev.tags.some(tag => tag[0] === 'p' && tag[1] === myPubkeyHex);
         if (ev.kind === 4) {
+            if (ev.pubkey !== myPubkeyHex && !addressedToMe) return null;
             const isMe = ev.pubkey === myPubkeyHex;
             const partner = isMe ? (ev.tags.find(t => t[0] === 'p')?.[1]) : ev.pubkey;
             if (!partner) return null;
@@ -26,6 +30,7 @@ class NostrCrypto {
         }
 
         if (ev.kind === 1059) {
+            if (!addressedToMe) return null;
             try {
                 const sealJson = isNip07 ? await window.nostr.nip44.decrypt(ev.pubkey, ev.content) : nip44.decrypt(ev.content, nip44.getConversationKey(myPrivBytes, ev.pubkey));
                 const sealEvent = JSON.parse(sealJson);
@@ -39,6 +44,8 @@ class NostrCrypto {
                 const gossipEvent = JSON.parse(gossipJson);
 
                 if (gossipEvent.kind === 14) {
+                    const partner = directChatPartner(gossipEvent, sealEvent.pubkey, myPubkeyHex);
+                    if (!partner) return null;
                     // 🔒 Gossip (kind 14) je dle NIP-17 záměrně nepodepsaný, ale jeho `id`
                     // je pořád hash obsahu — dopočítáme ho a porovnáme, abychom odhalili
                     // jakoukoliv manipulaci s obsahem/časem zprávy po cestě.
@@ -55,8 +62,6 @@ class NostrCrypto {
                     }
 
                     const isMe = sealEvent.pubkey === myPubkeyHex;
-                    const partner = isMe ? (gossipEvent.tags.find(t => t[0] === 'p')?.[1]) : sealEvent.pubkey;
-                    if (!partner) return null;
 
                     // Ukládáme i wrapIds (ID vnějšího obalu, které znají servery).
                     return { id: gossipEvent.id, wrapIds: [ev.id], text: gossipEvent.content, isMe, timestamp: gossipEvent.created_at, partnerPubkey: partner, ownerPubkey: myPubkeyHex };
@@ -174,8 +179,10 @@ export class NostrClient {
         // 🔒 Ověření podpisu HNED na vstupu. Relay je nedůvěryhodný prostředník —
         // bez tohoto by se dal podvrhnout kind 0 (profil), kind 4/1059 (zprávy)
         // i kind 10002/10050 (relay listy) s cizí `pubkey`, ale bez platného podpisu.
-        if (!verifyEvent(ev)) {
-            Utils.log('ERROR', '⚠️ Odmítnuta událost s neplatným podpisem.', { id: ev.id, kind: ev.kind });
+        let valid = false;
+        try { valid = !!ev && verifyEvent(ev); } catch {}
+        if (!valid) {
+            Utils.log('ERROR', '⚠️ Odmítnuta událost s neplatným podpisem.', { id: ev?.id, kind: ev?.kind });
             return;
         }
 
@@ -224,12 +231,13 @@ export class NostrClient {
         const gossipEvent = { ...gossipTemplate, id: getEventHash(gossipTemplate), sig: "" };
         const expTime = (now + (14 * 24 * 60 * 60)).toString();
 
+        const randomTimestamp = () => now - Math.floor(crypto.getRandomValues(new Uint32Array(1))[0] / 2 ** 32 * 172800);
         const wrap = async (receiverHex) => {
             let sealContent = this.isNip07 ? await window.nostr.nip44.encrypt(receiverHex, JSON.stringify(gossipEvent)) : nip44.encrypt(JSON.stringify(gossipEvent), nip44.getConversationKey(this.privBytes, receiverHex));
-            const sealEvent = await NostrCrypto.signEvent({ kind: 13, created_at: now - Math.floor(Math.random() * 3600), tags: [], content: sealContent }, this.pubHex, this.privBytes, this.isNip07);
+            const sealEvent = await NostrCrypto.signEvent({ kind: 13, created_at: randomTimestamp(), tags: [], content: sealContent }, this.pubHex, this.privBytes, this.isNip07);
             const ephemeralPriv = generateSecretKey();
             const wrapContent = nip44.encrypt(JSON.stringify(sealEvent), nip44.getConversationKey(ephemeralPriv, receiverHex));
-            return finalizeEvent({ kind: 1059, created_at: now, tags: [["p", receiverHex], ["expiration", expTime]], content: wrapContent }, ephemeralPriv);
+            return finalizeEvent({ kind: 1059, created_at: randomTimestamp(), tags: [["p", receiverHex], ["expiration", expTime]], content: wrapContent }, ephemeralPriv);
         };
 
         const partnerWrap = await wrap(partnerHex);

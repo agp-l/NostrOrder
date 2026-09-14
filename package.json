@@ -1,0 +1,9 @@
+{
+  "name": "nostrorder",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "check": "node --check js/app.js && node --check js/nostr.js && node --check js/ui.js && node --check js/database.js && node --check js/message-validation.js"
+  }
+}
