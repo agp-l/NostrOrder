@@ -122,6 +122,16 @@ try {
         await page.waitForFunction(()=>{
             const rect=document.getElementById('sendBtn').getBoundingClientRect();
             return rect.width>0&&rect.x>=0&&rect.y>=0&&rect.right<=innerWidth&&rect.bottom<=innerHeight;
+        },null,{timeout:5000}).catch(async error=>{
+            console.error('Composer layout',await page.evaluate(()=>({
+                viewport:{width:innerWidth,height:innerHeight},
+                elements:['.mobile-frame','#chatScreen','#chatWindow','.chat-footer','#messageInput','#sendBtn'].map(selector=>{
+                    const element=document.querySelector(selector),style=getComputedStyle(element);
+                    return {selector,rect:element.getBoundingClientRect().toJSON(),minWidth:style.minWidth,
+                        width:style.width,height:style.height,transform:style.transform,flex:style.flex};
+                })
+            })));
+            throw error;
         });
         const box=await page.locator('#sendBtn').boundingBox();
         assert.ok(box&&box.x>=0&&box.y>=0&&box.x+box.width<=viewport.width&&box.y+box.height<=viewport.height,JSON.stringify({box,viewport}));
